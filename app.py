@@ -12,10 +12,21 @@ def round_coords(lat, lng):
 
 @app.route("/pvout")
 def get_pvout():
-    lat = request.args.get("lat")
-    lng = request.args.get("lng")
-    if not lat or not lng:
-        return jsonify({"error": "Missing lat/lng"}), 400
-    key = round_coords(lat, lng)
-    pvout = pvout_data.get(key)
-    return jsonify({"pvout": pvout}) if pvout else ("Not found", 404)
+    lat = float(request.args.get("lat"))
+    lng = float(request.args.get("lng"))
+
+    key = f"{round(lat,4)},{round(lng,4)}"
+    if key in pvout_data:
+        return jsonify({"pvout": pvout_data[key]})
+
+    # Búsqueda cercana si no hay coincidencia exacta
+    closest = None
+    min_dist = float("inf")
+    for k, v in pvout_data.items():
+        plat, plng = map(float, k.split(","))
+        dist = abs(plat - lat) + abs(plng - lng)
+        if dist < min_dist:
+            min_dist = dist
+            closest = v
+
+    return jsonify({"pvout": closest})
