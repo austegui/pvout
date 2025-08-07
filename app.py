@@ -3,8 +3,12 @@ import json
 
 app = Flask(__name__)
 
+# Cargar archivo
 with open("pvout_data.json") as f:
     pvout_data = json.load(f)
+
+def clean(val):
+    return str(round(val, 4)).rstrip("0").rstrip(".")
 
 @app.route("/pvout")
 def get_pvout():
@@ -12,16 +16,20 @@ def get_pvout():
         lat = float(request.args.get("lat"))
         lng = float(request.args.get("lng"))
     except:
-        return jsonify({"error": "Invalid or missing lat/lng"}), 400
+        return jsonify({"error": "Missing or invalid lat/lng"}), 400
 
+    key = f"{clean(lat)},{clean(lng)}"
+    if key in pvout_data:
+        return jsonify({"pvout": pvout_data[key]})
+
+    # Buscar el punto más cercano
     closest_key = None
-    min_distance = float("inf")
-
-    for k in pvout_data.keys():
+    min_dist = float("inf")
+    for k in pvout_data:
         plat, plng = map(float, k.split(","))
         dist = abs(plat - lat) + abs(plng - lng)
-        if dist < min_distance:
-            min_distance = dist
+        if dist < min_dist:
+            min_dist = dist
             closest_key = k
 
     if closest_key:
