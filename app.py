@@ -3,30 +3,28 @@ import json
 
 app = Flask(__name__)
 
-# Cargar PVOUT procesado
 with open("pvout_data.json") as f:
     pvout_data = json.load(f)
 
-def round_coords(lat, lng):
-    return f"{round(float(lat),4)},{round(float(lng),4)}"
-
 @app.route("/pvout")
 def get_pvout():
-    lat = float(request.args.get("lat"))
-    lng = float(request.args.get("lng"))
+    try:
+        lat = float(request.args.get("lat"))
+        lng = float(request.args.get("lng"))
+    except:
+        return jsonify({"error": "Invalid or missing lat/lng"}), 400
 
-    key = f"{round(lat,4)},{round(lng,4)}"
-    if key in pvout_data:
-        return jsonify({"pvout": pvout_data[key]})
+    closest_key = None
+    min_distance = float("inf")
 
-    # Búsqueda cercana si no hay coincidencia exacta
-    closest = None
-    min_dist = float("inf")
-    for k, v in pvout_data.items():
+    for k in pvout_data.keys():
         plat, plng = map(float, k.split(","))
         dist = abs(plat - lat) + abs(plng - lng)
-        if dist < min_dist:
-            min_dist = dist
-            closest = v
+        if dist < min_distance:
+            min_distance = dist
+            closest_key = k
 
-    return jsonify({"pvout": closest})
+    if closest_key:
+        return jsonify({"pvout": pvout_data[closest_key]})
+    else:
+        return jsonify({"error": "No PVOUT found"}), 404
