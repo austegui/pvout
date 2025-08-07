@@ -3,10 +3,11 @@ import json
 
 app = Flask(__name__)
 
-# Cargar archivo
+# Cargar datos desde JSON
 with open("pvout_data.json") as f:
     pvout_data = json.load(f)
 
+# Formateo para clave: redondea sin ceros innecesarios
 def clean(val):
     return str(round(val, 4)).rstrip("0").rstrip(".")
 
@@ -19,6 +20,7 @@ def get_pvout():
         return jsonify({"error": "Missing or invalid lat/lng"}), 400
 
     key = f"{clean(lat)},{clean(lng)}"
+
     if key in pvout_data:
         return jsonify({"pvout": pvout_data[key]})
 
