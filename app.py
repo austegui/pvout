@@ -5,6 +5,7 @@ import re
 import time
 import logging
 import requests
+from urllib.parse import urlparse, parse_qs
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 
@@ -196,14 +197,18 @@ def create_lead():
         "nombre": nombre,
         "email": email,
         "timestamp": now_iso(),
+        # Mantenemos el objeto UTM y agregamos campos planos por facilidad en n8n
         "utm": {
             "source": utm.get("source", ""),
             "medium": utm.get("medium", ""),
             "campaign": utm.get("campaign", ""),
         },
+        "utm_source": utm.get("source", ""),
+        "utm_medium": utm.get("medium", ""),
+        "utm_campaign": utm.get("campaign", ""),
     }
     send_webhook("lead_created", payload)
-    return jsonify({"status": "ok", "lead_id": lead_id}), 201
+    return jsonify({"status": "ok", "lead_id": lead_id, "utm": payload["utm"]}), 201
 
 @app.post("/calculate/consumption")
 def calculate_consumption():
@@ -290,6 +295,31 @@ def calculate_solar():
     lat = float(data.get("lat") or 0)
     lng = float(data.get("lng") or 0)
 
+    # --- UTM extraction (JSON -> query -> Referer) ---
+    utm_obj = (lead.get("utm") or data.get("utm") or {}) if isinstance(data, dict) else {}
+    utm_source = utm_obj.get("source", "")
+    utm_medium = utm_obj.get("medium", "")
+    utm_campaign = utm_obj.get("campaign", "")
+
+    # Fallback to query string ?utm_source=...
+    utm_source = utm_source or (request.args.get("utm_source") or "")
+    utm_medium = utm_medium or (request.args.get("utm_medium") or "")
+    utm_campaign = utm_campaign or (request.args.get("utm_campaign") or "")
+
+    # Fallback to Referer header
+    if not (utm_source and utm_medium and utm_campaign):
+        ref = request.headers.get("Referer", "")
+        if ref:
+            try:
+                qd = parse_qs(urlparse(ref).query)
+                utm_source = utm_source or (qd.get("utm_source", [""])[0])
+                utm_medium = utm_medium or (qd.get("utm_medium", [""])[0])
+                utm_campaign = utm_campaign or (qd.get("utm_campaign", [""])[0])
+            except Exception:
+                logging.exception("Error parsing Referer for UTM")
+
+    logging.info(f"UTM resolved => source={utm_source} medium={utm_medium} campaign={utm_campaign}")
+
     if not provincia_id or pvout <= 0 or mensual_promedio <= 0 or diario_promedio <= 0:
         return jsonify({"error": "Datos insuficientes para cálculo solar"}), 400
 
@@ -339,7 +369,7 @@ def calculate_solar():
         ahorro_mensual = calcular_tarifa_valor(kwh_mensual, tarifa)
         costo_con_solar = max(costo_actual_mensual - ahorro_mensual, 0.0)
 
-    # Payback en años (precio_final / costo_actual_mensual)
+    # Payback en años
     dec = CONFIG.get("finance", {}).get("payback_decimals", 1)
     payback_years = (precio_final / costo_actual_mensual) / 12.0 if (precio_final > 0 and costo_actual_mensual > 0) else 0.0
     ahorro_30_anos = (max(ahorro_mensual, 0.0) * 12.0 * 30.0) - precio_final
@@ -385,14 +415,14 @@ def calculate_solar():
         "tarifa_desglose_produccion": desglose_produccion,
     }
 
-    # ---------- Webhook con snake_case + coordenadas ----------
+    # ---------- Webhook con snake_case + coordenadas + UTM ----------
     webhook_payload = {
         "lead_id": lead.get("lead_id", ""),
         "nombre": lead.get("nombre", ""),
         "email": lead.get("email", ""),
-        "utm_source": lead.get("utm", {}).get("source", ""),
-        "utm_medium": lead.get("utm", {}).get("medium", ""),
-        "utm_campaign": lead.get("utm", {}).get("campaign", ""),
+        "utm_source": utm_source,
+        "utm_medium": utm_medium,
+        "utm_campaign": utm_campaign,
         "provincia": provincia["nombre"],
         "kwh_mensuales": round(mensual_promedio, 2),
         "kwh_diarios": round(diario_promedio, 2),
