@@ -34,6 +34,7 @@ def provincia_to_tarifa_key(provincia_id):
         return None, None
     return prov["distribuidora"], prov
 
+# --- Cálculo de tarifa (total) idéntico a tu lógica ---
 def calcular_tarifa_valor(kwh, tarifa):
     total = tarifa["comercializacion"]
     restante = float(kwh)
@@ -46,6 +47,59 @@ def calcular_tarifa_valor(kwh, tarifa):
     if restante > 0:
         total += restante * tarifa["tier3"]
     return max(total, 0.0)
+
+# --- NUEVO: desglose por tramos/tier para mostrar en UI ---
+def calcular_tarifa_detalle(kwh, tarifa):
+    detalle = {
+        "fijo": 0.0,
+        "comercializacion": float(tarifa["comercializacion"]),
+        "tramos": [],  # cada tramo: { "label": "11-300", "kwh": x, "precio_unit": y, "subtotal": z }
+        "total": 0.0
+    }
+    total = detalle["comercializacion"]
+    restante = float(kwh)
+
+    if restante > 0:
+        detalle["fijo"] = float(tarifa["fijo"])
+        total += detalle["fijo"]
+        restante -= 10
+
+    if restante > 0:
+        tramo1 = min(restante, 290.0)
+        subtotal1 = tramo1 * float(tarifa["tier1"])
+        detalle["tramos"].append({
+            "label": "11-300",
+            "kwh": round(tramo1, 2),
+            "precio_unit": float(tarifa["tier1"]),
+            "subtotal": round(subtotal1, 2)
+        })
+        total += subtotal1
+        restante -= tramo1
+
+    if restante > 0:
+        tramo2 = min(restante, 450.0)
+        subtotal2 = tramo2 * float(tarifa["tier2"])
+        detalle["tramos"].append({
+            "label": "301-750",
+            "kwh": round(tramo2, 2),
+            "precio_unit": float(tarifa["tier2"]),
+            "subtotal": round(subtotal2, 2)
+        })
+        total += subtotal2
+        restante -= tramo2
+
+    if restante > 0:
+        subtotal3 = restante * float(tarifa["tier3"])
+        detalle["tramos"].append({
+            "label": "750+",
+            "kwh": round(restante, 2),
+            "precio_unit": float(tarifa["tier3"]),
+            "subtotal": round(subtotal3, 2)
+        })
+        total += subtotal3
+
+    detalle["total"] = round(total, 2)
+    return detalle
 
 def send_webhook(event, payload):
     try:
@@ -118,6 +172,7 @@ def calculate_consumption():
     diario_promedio = mensual_promedio / 30.0
 
     costo_actual_mensual = calcular_tarifa_valor(mensual_promedio, tarifa)
+    detalle_actual = calcular_tarifa_detalle(mensual_promedio, tarifa)
 
     return jsonify({
         "consumo": {
@@ -129,10 +184,11 @@ def calculate_consumption():
             "tarifa": tarifa_key,
             "costo_actual_mensual": round(costo_actual_mensual, 2)
         },
+        "tarifa_desglose": detalle_actual,
         "provincia": {
             "id": provincia["id"],
             "nombre": provincia["nombre"],
-            "markup_pct": provincia["markup_pct"]
+            "markup_pct": provincia["markup_pct"]  # operativo; no se muestra en UI
         },
         "ui": {
             "title": CONFIG["ui"]["rename_labels"]["consumption_monthly_estimate"]
@@ -210,7 +266,7 @@ def calculate_solar():
     precio_base = float(precios.get(str(paneles))) if str(paneles) in precios else 0.0
     cotizacion_personalizada = (precio_base == 0.0 or paneles > max_precio_paneles)
 
-    markup_pct = float(provincia["markup_pct"])
+    markup_pct = float(provincia["markup_pct"])  # operativo; no se muestra en UI
     precio_final = precio_base * (1 + markup_pct / 100.0) if precio_base > 0 else 0.0
 
     # Finanzas
@@ -221,10 +277,16 @@ def calculate_solar():
         remanente = max(mensual_promedio - kwh_mensual, 0.0)
         costo_con_solar = calcular_tarifa_valor(remanente, tarifa)
         ahorro_mensual = costo_actual_mensual - costo_con_solar
+        # desglose con solar (para UI)
+        detalle_con_solar = calcular_tarifa_detalle(remanente, tarifa)
     else:
+        # método "generado": menos fiel a factura, pero mantenido por compatibilidad
         ahorro_mensual = calcular_tarifa_valor(kwh_mensual, tarifa)
+        costo_con_solar = max(costo_actual_mensual - ahorro_mensual, 0.0)
+        # Para evitar inconsistencias, no calculamos desglose en este modo
+        detalle_con_solar = None
 
-    # Payback SOLO en años (precio_final / costo_actual_mensual)  **CORRECCIÓN**
+    # Payback SOLO en años (precio_final / costo_actual_mensual)
     payback_years = 0.0
     if costo_actual_mensual > 0 and precio_final > 0:
         payback_years = (precio_final / costo_actual_mensual) / 12.0
@@ -233,6 +295,7 @@ def calculate_solar():
     reduccion_pct = min(max((max(ahorro_mensual, 0.0) / costo_actual_mensual) * 100.0 if costo_actual_mensual > 0 else 0, 0.0), 100.0)
 
     dec = CONFIG.get("finance", {}).get("payback_decimals", 1)
+
     resp = {
         "dimensionamiento": {
             "paneles": paneles,
@@ -249,9 +312,9 @@ def calculate_solar():
             "tarifa": tarifa_key,
             "costo_actual_mensual": round(costo_actual_mensual, 2),
             "ahorro_mensual_estimado": round(max(ahorro_mensual, 0.0), 2),
-            "nuevo_costo_mensual": round(max(costo_actual_mensual - ahorro_mensual, 0.0), 2),
+            "nuevo_costo_mensual": round(max(costo_con_solar, 0.0), 2),
             "precio_base_sistema": round(precio_base, 2),
-            "markup_pct": markup_pct,
+            "markup_pct": markup_pct,  # no se muestra en UI
             "precio_final_sistema": round(precio_final, 2),
             "payback_years": round(payback_years, dec),
             "ahorro_30_anos": round(ahorro_30_anos, 2),
@@ -263,11 +326,11 @@ def calculate_solar():
                 "monthly_prod": CONFIG["ui"]["rename_labels"]["solar_monthly_production"],
                 "payback": "Tiempo de recuperación"
             },
-            "display": {
-                "payback_text": f"Tiempo de recuperación: {round(payback_years, dec)} años"
-            },
             "cotizacion_personalizada": cotizacion_personalizada
-        }
+        },
+        # nuevos desgloses para UI
+        "tarifa_desglose_actual": calcular_tarifa_detalle(mensual_promedio, tarifa),
+        "tarifa_desglose_con_solar": detalle_con_solar
     }
 
     payload = {
