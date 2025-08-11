@@ -1,56 +1,32 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import json, math, re, time
+import json, math, re, time, os
 import requests
 
 app = Flask(__name__)
-CORS(app)
+CORS(
+    app,
+    resources={r"/*": {"origins": ["*", "null"]}},
+    methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+    supports_credentials=False,
+    max_age=600
+)
 
-# ---------- Carga de configuración y datos ----------
+# --- Carga de configuración y datos ---
 with open("config.json", "r", encoding="utf-8") as f:
     CONFIG = json.load(f)
 
 with open("pvout_data.json", "r", encoding="utf-8") as f:
     PVOUT_DATA = json.load(f)
 
-# ---------- Utilidades de formato ----------
 EMAIL_RE = re.compile(CONFIG["validacion"]["lead"]["email_regex"])
-
-def round_coords(lat, lng):
-    return f"{round(float(lat), 4)},{round(float(lng), 4)}"
 
 def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
-# ---------- Acceso a config segura para el cliente ----------
-CLIENT_CONFIG_KEYS = [
-    "ui", "provincias", "tarifas", "sistemas",
-    "precios_sistema_por_paneles", "formatos"
-]
-
-@app.get("/config")
-def get_config():
-    safe = {k: CONFIG[k] for k in CLIENT_CONFIG_KEYS if k in CONFIG}
-    return jsonify(safe)
-
-# ---------- Validaciones ----------
-def validate_lead(nombre, email):
-    if not nombre or len(nombre.strip()) < CONFIG["validacion"]["lead"]["nombre_min_len"]:
-        return False, "Nombre inválido"
-    if not email or not EMAIL_RE.match(email):
-        return False, "Email inválido"
-    return True, None
-
-def validate_consumos(consumos):
-    if not isinstance(consumos, list) or len(consumos) != 12:
-        return False, "Debes enviar 12 valores (enero..diciembre)"
-    min_v = CONFIG["validacion"]["consumo"]["mes_kwh_min"]
-    max_v = CONFIG["validacion"]["consumo"]["mes_kwh_max"]
-    if all((v or 0) <= 0 for v in consumos):
-        return False, "Ingresa al menos un mes > 0"
-    if any((v or 0) < min_v or (v or 0) > max_v for v in consumos):
-        return False, "Valores de consumo fuera de rango"
-    return True, None
+def round_coords(lat, lng):
+    return f"{round(float(lat), 4)},{round(float(lng), 4)}"
 
 def provincia_to_tarifa_key(provincia_id):
     prov = next((p for p in CONFIG["provincias"] if p["id"] == provincia_id), None)
@@ -58,7 +34,19 @@ def provincia_to_tarifa_key(provincia_id):
         return None, None
     return prov["distribuidora"], prov
 
-# ---------- Envío a Webhook ----------
+def calcular_tarifa_valor(kwh, tarifa):
+    total = tarifa["comercializacion"]
+    restante = float(kwh)
+    if restante > 0:
+        total += tarifa["fijo"]; restante -= 10
+    if restante > 0:
+        b = min(restante, 290); total += b * tarifa["tier1"]; restante -= b
+    if restante > 0:
+        b = min(restante, 450); total += b * tarifa["tier2"]; restante -= b
+    if restante > 0:
+        total += restante * tarifa["tier3"]
+    return max(total, 0.0)
+
 def send_webhook(event, payload):
     try:
         wh = CONFIG["services"]["webhook"]
@@ -73,21 +61,13 @@ def send_webhook(event, payload):
         # No romper flujo si el webhook falla
         pass
 
-# ---------- Cálculo de tarifa (idéntico a tu lógica) ----------
-def calcular_tarifa_valor(kwh, tarifa):
-    total = tarifa["comercializacion"]
-    restante = float(kwh)
-    if restante > 0:
-        total += tarifa["fijo"]; restante -= 10
-    if restante > 0:
-        b = min(restante, 290); total += b * tarifa["tier1"]; restante -= b
-    if restante > 0:
-        b = min(restante, 450); total += b * tarifa["tier2"]; restante -= b
-    if restante > 0:
-        total += restante * tarifa["tier3"]
-    return max(total, 0.0)
+# ----------- Endpoints -----------
+@app.get("/config")
+def get_config():
+    safe_keys = ["ui", "provincias", "tarifas", "sistemas", "precios_sistema_por_paneles", "formatos", "finance"]
+    safe = {k: CONFIG[k] for k in safe_keys if k in CONFIG}
+    return jsonify(safe)
 
-# ---------- Lead ----------
 @app.post("/lead")
 def create_lead():
     data = request.get_json(force=True)
@@ -95,9 +75,10 @@ def create_lead():
     email = (data.get("email") or "").strip()
     utm = data.get("utm") or {}
 
-    ok, err = validate_lead(nombre, email)
-    if not ok:
-        return jsonify({"error": err}), 400
+    if not nombre or len(nombre) < CONFIG["validacion"]["lead"]["nombre_min_len"]:
+        return jsonify({"error": "Nombre inválido"}), 400
+    if not EMAIL_RE.match(email or ""):
+        return jsonify({"error": "Email inválido"}), 400
 
     lead_id = f"ld_{int(time.time())}"
     payload = {
@@ -114,16 +95,16 @@ def create_lead():
     send_webhook("lead_created", payload)
     return jsonify({"status": "ok", "lead_id": lead_id}), 201
 
-# ---------- Consumo ----------
 @app.post("/calculate/consumption")
 def calculate_consumption():
     data = request.get_json(force=True)
     provincia_id = data.get("provincia_id")
     consumos = data.get("consumos_kwh")
 
-    ok, err = validate_consumos(consumos)
-    if not ok:
-        return jsonify({"error": err}), 400
+    if not isinstance(consumos, list) or len(consumos) != 12:
+        return jsonify({"error": "Debes enviar 12 valores (enero..diciembre)"}), 400
+    if all((v or 0) <= 0 for v in consumos):
+        return jsonify({"error": "Ingresa al menos un mes > 0"}), 400
 
     tarifa_key, provincia = provincia_to_tarifa_key(provincia_id)
     if not tarifa_key or tarifa_key not in CONFIG["tarifas"]:
@@ -158,7 +139,6 @@ def calculate_consumption():
         }
     })
 
-# ---------- PVOUT (tu endpoint, con fallback a cercanos) ----------
 @app.get("/pvout")
 def get_pvout():
     try:
@@ -171,7 +151,6 @@ def get_pvout():
     if key in PVOUT_DATA:
         return jsonify({"pvout": PVOUT_DATA[key]})
 
-    # búsqueda aproximada
     closest_val = None
     min_dist = float("inf")
     for k, v in PVOUT_DATA.items():
@@ -185,7 +164,6 @@ def get_pvout():
         return jsonify({"pvout": closest_val})
     return jsonify({"error": "No se encontró PVOUT para esas coordenadas"}), 404
 
-# ---------- Solar ----------
 @app.post("/calculate/solar")
 def calculate_solar():
     data = request.get_json(force=True)
@@ -194,7 +172,6 @@ def calculate_solar():
     provincia_id = data.get("provincia_id")
     pvout = float(data.get("pvout") or 0)
     consumo = data.get("consumo") or {}
-
     mensual_promedio = float(consumo.get("mensual_promedio_kwh") or 0)
     diario_promedio = float(consumo.get("diario_promedio_kwh") or 0)
 
@@ -206,7 +183,6 @@ def calculate_solar():
         return jsonify({"error": "Provincia/tarifa inválida"}), 400
     tarifa = CONFIG["tarifas"][tarifa_key]
 
-    # Selección defaults desde config
     inv = next((i for i in CONFIG["sistemas"]["inversores"] if i.get("recomendado")), CONFIG["sistemas"]["inversores"][0])
     panel = next((p for p in CONFIG["sistemas"]["paneles"] if p.get("default")), CONFIG["sistemas"]["paneles"][0])
     reglas = CONFIG["sistemas"]["reglas_dimensionamiento"]
@@ -231,14 +207,11 @@ def calculate_solar():
 
     # Precios
     precios = CONFIG["precios_sistema_por_paneles"]
-    precio_base = float(precios.get(str(paneles))) if str(paneles) in precios else None
-    cotizacion_personalizada = False
-    if precio_base is None or paneles > max_precio_paneles:
-        cotizacion_personalizada = True
-        precio_base = 0.0
+    precio_base = float(precios.get(str(paneles))) if str(paneles) in precios else 0.0
+    cotizacion_personalizada = (precio_base == 0.0 or paneles > max_precio_paneles)
 
     markup_pct = float(provincia["markup_pct"])
-    precio_final = precio_base * (1 + markup_pct / 100.0)
+    precio_final = precio_base * (1 + markup_pct / 100.0) if precio_base > 0 else 0.0
 
     # Finanzas
     costo_actual_mensual = calcular_tarifa_valor(mensual_promedio, tarifa)
@@ -248,22 +221,17 @@ def calculate_solar():
         remanente = max(mensual_promedio - kwh_mensual, 0.0)
         costo_con_solar = calcular_tarifa_valor(remanente, tarifa)
         ahorro_mensual = costo_actual_mensual - costo_con_solar
-    else:  # "generado"
+    else:
         ahorro_mensual = calcular_tarifa_valor(kwh_mensual, tarifa)
 
-    # Payback SOLO en años (corrección solicitada)
+    # Payback SOLO en años (precio_final / costo_actual_mensual)  **CORRECCIÓN**
     payback_years = 0.0
     if costo_actual_mensual > 0 and precio_final > 0:
         payback_years = (precio_final / costo_actual_mensual) / 12.0
 
-    # Ahorro a 30 años (mantengo resta del precio final; puedes cambiarlo si quieres)
-    ahorro_30_anos = (ahorro_mensual * 12.0 * 30.0) - precio_final
+    ahorro_30_anos = (max(ahorro_mensual, 0.0) * 12.0 * 30.0) - precio_final
+    reduccion_pct = min(max((max(ahorro_mensual, 0.0) / costo_actual_mensual) * 100.0 if costo_actual_mensual > 0 else 0, 0.0), 100.0)
 
-    reduccion_pct = 0.0
-    if costo_actual_mensual > 0:
-        reduccion_pct = min(max((ahorro_mensual / costo_actual_mensual) * 100.0, 0.0), 100.0)
-
-    # Redondeos UI
     dec = CONFIG.get("finance", {}).get("payback_decimals", 1)
     resp = {
         "dimensionamiento": {
@@ -302,7 +270,6 @@ def calculate_solar():
         }
     }
 
-    # Webhook
     payload = {
         "lead": {
             "lead_id": lead.get("lead_id", ""),
@@ -328,3 +295,7 @@ def calculate_solar():
     send_webhook("solar_calculated", payload)
 
     return jsonify(resp)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
