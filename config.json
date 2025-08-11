@@ -1,0 +1,155 @@
+
+
+{
+  "version": "1.0.0",
+  "updated_at": "2025-08-10",
+
+  "ui": {
+    "brand": "Solar Solution Savings Panamá",
+    "keep_style": true,
+    "lead_required": true,
+    "rename_labels": {
+      "consumption_monthly_estimate": "Consumo Mensual Estimado",
+      "solar_production_breakdown": "Desglose de Producción",
+      "solar_monthly_production": "Producción mensual estimada"
+    },
+    "flow_flags": {
+      "only_monthly_inputs": true,
+      "auto_calc_on_pvout": true,
+      "hide_total_mode": true
+    }
+  },
+
+  "services": {
+    "pvout_api": {
+      "url": "https://monkfish-app-97mah.ondigitalocean.app/pvout",
+      "method": "GET",
+      "query_params": ["lat", "lng"],
+      "timeout_ms": 8000,
+      "retries": 1
+    },
+    "webhook": {
+      "url": "https://n8n.soldeia.com/webhook/9dd2c57b-40e9-40bf-97ad-fd45d74acc30",
+      "method": "POST",
+      "timeout_ms": 8000,
+      "retries": 1,
+      "send_on": ["lead_created", "solar_calculated"]
+    }
+  },
+
+  "provincias": [
+    { "id": "panama",        "nombre": "Panamá",                 "markup_pct": 0, "distribuidora": "ensa" },
+    { "id": "panama_este",   "nombre": "Panamá Este",            "markup_pct": 0, "distribuidora": "ensa" },
+    { "id": "colón",         "nombre": "Colón",                  "markup_pct": 2, "distribuidora": "ensa" },
+    { "id": "darién",        "nombre": "Darién",                 "markup_pct": 6, "distribuidora": "ensa" },
+    { "id": "coclé",         "nombre": "Coclé",                  "markup_pct": 3, "distribuidora": "edemet" },
+    { "id": "herrera",       "nombre": "Herrera",                "markup_pct": 3, "distribuidora": "edemet" },
+    { "id": "los_santos",    "nombre": "Los Santos",             "markup_pct": 4, "distribuidora": "edemet" },
+    { "id": "veraguas",      "nombre": "Veraguas",               "markup_pct": 4, "distribuidora": "edemet" },
+    { "id": "chiriquí",      "nombre": "Chiriquí",               "markup_pct": 5, "distribuidora": "edechi" },
+    { "id": "bocas_del_toro","nombre": "Bocas del Toro",         "markup_pct": 7, "distribuidora": "edechi" },
+    { "id": "ngäbe_buglé",   "nombre": "Comarca Ngäbe-Buglé",    "markup_pct": 8, "distribuidora": "edechi" }
+  ],
+
+  "tarifas": {
+    "ensa":   { "nombre": "ENSA",   "fijo": 2.56, "tier1": 0.16682, "tier2": 0.21213, "tier3": 0.24678, "comercializacion": 2.56 },
+    "edechi": { "nombre": "EDECHI", "fijo": 2.99, "tier1": 0.16156, "tier2": 0.20891, "tier3": 0.29914, "comercializacion": 2.99 },
+    "edemet": { "nombre": "EDEMET", "fijo": 3.05, "tier1": 0.15394, "tier2": 0.21593, "tier3": 0.30861, "comercializacion": 3.05 }
+  },
+
+  "sistemas": {
+    "inversores": [
+      { "id": "micro", "nombre": "Microinversor",      "eficiencia": 0.82, "recomendado": true },
+      { "id": "central", "nombre": "Inversor central", "eficiencia": 0.75, "recomendado": false }
+    ],
+    "paneles": [
+      { "id": "p580", "nombre": "Panel solar 580W", "potencia_kw": 0.58, "default": true }
+    ],
+    "reglas_dimensionamiento": {
+      "paneles_multiplo": 2,
+      "paneles_por_inversor": 4,
+      "max_paneles_precio": 30
+    }
+  },
+
+  "precios_sistema_por_paneles": {
+    "6": 3899,
+    "8": 4400,
+    "10": 4999,
+    "12": 5700,
+    "14": 6550,
+    "16": 7420,
+    "18": 8330,
+    "20": 9225,
+    "22": 10090,
+    "24": 10980,
+    "26": 11835,
+    "28": 12725,
+    "30": 13600
+  },
+
+  "formatos": {
+    "moneda": {
+      "iso": "USD",
+      "simbolo": "$",
+      "decimales": 2,
+      "separador_miles": ",",
+      "separador_decimales": "."
+    },
+    "porcentaje_decimales": 2
+  },
+
+  "validacion": {
+    "lead": {
+      "nombre_min_len": 2,
+      "email_regex": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"
+    },
+    "consumo": {
+      "mes_kwh_min": 0,
+      "mes_kwh_max": 50000,
+      "requiere_al_menos_un_mes": true
+    }
+  },
+
+  "payloads": {
+    "lead_created": {
+      "nombre": "",
+      "email": "",
+      "timestamp": "",
+      "utm": { "source": "", "medium": "", "campaign": "" }
+    },
+    "solar_calculated": {
+      "lead": { "nombre": "", "email": "" },
+      "ubicacion": { "lat": 0, "lng": 0, "provincia_id": "", "provincia_nombre": "" },
+      "pvout": 0,
+      "consumo": {
+        "mensual_promedio_kwh": 0,
+        "diario_promedio_kwh": 0,
+        "meses_cargados": 0
+      },
+      "dimensionamiento": {
+        "paneles": 0,
+        "inversores": 0,
+        "capacidad_expansion_paneles": 0
+      },
+      "produccion": {
+        "diaria_kwh": 0,
+        "mensual_kwh": 0,
+        "anual_kwh": 0,
+        "cobertura_pct": 0
+      },
+      "finanzas": {
+        "tarifa": "ensa",
+        "costo_actual_mensual": 0,
+        "ahorro_mensual_estimado": 0,
+        "nuevo_costo_mensual": 0,
+        "precio_base_sistema": 0,
+        "markup_pct": 0,
+        "precio_final_sistema": 0,
+        "meses_payback": 0,
+        "ahorro_30_anos": 0,
+        "reduccion_factura_pct": 0
+      }
+    }
+  }
+}
