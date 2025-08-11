@@ -13,6 +13,12 @@ CORS(
     max_age=600
 )
 
+# === Webhook directo (no usa config.json) ===
+WEBHOOK_URL = os.environ.get(
+    "WEBHOOK_URL",
+    "https://n8n.soldeia.com/webhook/9dd2c57b-40e9-40bf-97ad-fd45d74acc30"
+)
+
 # --- Carga de configuración y datos ---
 with open("config.json", "r", encoding="utf-8") as f:
     CONFIG = json.load(f)
@@ -34,36 +40,45 @@ def provincia_to_tarifa_key(provincia_id):
         return None, None
     return prov["distribuidora"], prov
 
-# --- Cálculo de tarifa (total) idéntico a tu lógica ---
-def calcular_tarifa_valor(kwh, tarifa):
-    total = tarifa["comercializacion"]
-    restante = float(kwh)
-    if restante > 0:
-        total += tarifa["fijo"]; restante -= 10
-    if restante > 0:
-        b = min(restante, 290); total += b * tarifa["tier1"]; restante -= b
-    if restante > 0:
-        b = min(restante, 450); total += b * tarifa["tier2"]; restante -= b
-    if restante > 0:
-        total += restante * tarifa["tier3"]
-    return max(total, 0.0)
+# ---------- BASE CHARGE (una sola vez) ----------
+def get_base_charge(tarifa: dict) -> float:
+    fijo = float(tarifa.get("fijo", 0) or 0)
+    comercializacion = float(tarifa.get("comercializacion", 0) or 0)
+    if fijo > 0:
+        return fijo
+    return comercializacion
 
-# --- NUEVO: desglose por tramos/tier para mostrar en UI ---
+# --- total factura con tramos (sin duplicar base) ---
+def calcular_tarifa_valor(kwh, tarifa):
+    restante = float(kwh)
+    total = 0.0
+    base = get_base_charge(tarifa)
+    if restante > 0 and base > 0:
+        total += base
+        restante -= 10  # regla original
+    if restante > 0:
+        b = min(restante, 290); total += b * float(tarifa["tier1"]); restante -= b
+    if restante > 0:
+        b = min(restante, 450); total += b * float(tarifa["tier2"]); restante -= b
+    if restante > 0:
+        total += restante * float(tarifa["tier3"])
+    return round(max(total, 0.0), 2)
+
+# --- detalle por tramos (sin duplicar base) ---
 def calcular_tarifa_detalle(kwh, tarifa):
+    restante = float(kwh)
     detalle = {
         "fijo": 0.0,
-        "comercializacion": float(tarifa["comercializacion"]),
-        "tramos": [],  # cada tramo: { "label": "11-300", "kwh": x, "precio_unit": y, "subtotal": z }
+        "comercializacion": 0.0,
+        "tramos": [],
         "total": 0.0
     }
-    total = detalle["comercializacion"]
-    restante = float(kwh)
-
-    if restante > 0:
-        detalle["fijo"] = float(tarifa["fijo"])
-        total += detalle["fijo"]
+    total = 0.0
+    base = get_base_charge(tarifa)
+    if restante > 0 and base > 0:
+        detalle["fijo"] = float(base)
+        total += base
         restante -= 10
-
     if restante > 0:
         tramo1 = min(restante, 290.0)
         subtotal1 = tramo1 * float(tarifa["tier1"])
@@ -75,7 +90,6 @@ def calcular_tarifa_detalle(kwh, tarifa):
         })
         total += subtotal1
         restante -= tramo1
-
     if restante > 0:
         tramo2 = min(restante, 450.0)
         subtotal2 = tramo2 * float(tarifa["tier2"])
@@ -87,7 +101,6 @@ def calcular_tarifa_detalle(kwh, tarifa):
         })
         total += subtotal2
         restante -= tramo2
-
     if restante > 0:
         subtotal3 = restante * float(tarifa["tier3"])
         detalle["tramos"].append({
@@ -101,18 +114,16 @@ def calcular_tarifa_detalle(kwh, tarifa):
     detalle["total"] = round(total, 2)
     return detalle
 
-def send_webhook(event, payload):
+def send_webhook(event: str, payload: dict):
+    """Siempre envía; no depende de config.json ni de 'send_on'."""
     try:
-        wh = CONFIG["services"]["webhook"]
-        if event not in wh.get("send_on", []):
-            return
         requests.post(
-            wh["url"],
+            WEBHOOK_URL,
             json={"event": event, "payload": payload},
-            timeout=wh.get("timeout_ms", 8000) / 1000.0
+            timeout=8
         )
     except Exception:
-        # No romper flujo si el webhook falla
+        # No interrumpir el flujo si falla
         pass
 
 # ----------- Endpoints -----------
@@ -136,6 +147,7 @@ def create_lead():
 
     lead_id = f"ld_{int(time.time())}"
     payload = {
+        "lead_id": lead_id,
         "nombre": nombre,
         "email": email,
         "timestamp": now_iso(),
@@ -143,8 +155,7 @@ def create_lead():
             "source": utm.get("source", ""),
             "medium": utm.get("medium", ""),
             "campaign": utm.get("campaign", "")
-        },
-        "lead_id": lead_id
+        }
     }
     send_webhook("lead_created", payload)
     return jsonify({"status": "ok", "lead_id": lead_id}), 201
@@ -188,7 +199,7 @@ def calculate_consumption():
         "provincia": {
             "id": provincia["id"],
             "nombre": provincia["nombre"],
-            "markup_pct": provincia["markup_pct"]  # operativo; no se muestra en UI
+            "markup_pct": provincia["markup_pct"]  # operativo; no UI
         },
         "ui": {
             "title": CONFIG["ui"]["rename_labels"]["consumption_monthly_estimate"]
@@ -207,6 +218,7 @@ def get_pvout():
     if key in PVOUT_DATA:
         return jsonify({"pvout": PVOUT_DATA[key]})
 
+    # Búsqueda cercana
     closest_val = None
     min_dist = float("inf")
     for k, v in PVOUT_DATA.items():
@@ -230,6 +242,8 @@ def calculate_solar():
     consumo = data.get("consumo") or {}
     mensual_promedio = float(consumo.get("mensual_promedio_kwh") or 0)
     diario_promedio = float(consumo.get("diario_promedio_kwh") or 0)
+    lat = float(data.get("lat") or 0)
+    lng = float(data.get("lng") or 0)
 
     if not provincia_id or pvout <= 0 or mensual_promedio <= 0 or diario_promedio <= 0:
         return jsonify({"error": "Datos insuficientes para cálculo solar"}), 400
@@ -265,7 +279,7 @@ def calculate_solar():
     precios = CONFIG["precios_sistema_por_paneles"]
     precio_base = float(precios.get(str(paneles))) if str(paneles) in precios else 0.0
     cotizacion_personalizada = (precio_base == 0.0 or paneles > max_precio_paneles)
-    markup_pct = float(provincia["markup_pct"])
+    markup_pct = float(provincia["markup_pct"])  # operativo; no UI
     precio_final = precio_base * (1 + markup_pct / 100.0) if precio_base > 0 else 0.0
 
     # Finanzas
@@ -281,14 +295,13 @@ def calculate_solar():
         costo_con_solar = max(costo_actual_mensual - ahorro_mensual, 0.0)
 
     # Payback en años (precio_final / costo_actual_mensual)
+    dec = CONFIG.get("finance", {}).get("payback_decimals", 1)
     payback_years = (precio_final / costo_actual_mensual) / 12.0 if (precio_final > 0 and costo_actual_mensual > 0) else 0.0
     ahorro_30_anos = (max(ahorro_mensual, 0.0) * 12.0 * 30.0) - precio_final
     reduccion_pct = min(max((max(ahorro_mensual, 0.0) / costo_actual_mensual) * 100.0 if costo_actual_mensual > 0 else 0, 0.0), 100.0)
-    dec = CONFIG.get("finance", {}).get("payback_decimals", 1)
 
-    # Desgloses:
+    # Desgloses (para UI y webhook):
     desglose_actual = calcular_tarifa_detalle(mensual_promedio, tarifa)
-    # 👉 NUEVO: “Desglose de Costo de Producción Estimado” = mismo cálculo, pero con kWh de producción mensual
     desglose_produccion = calcular_tarifa_detalle(kwh_mensual, tarifa)
 
     resp = {
@@ -324,32 +337,33 @@ def calculate_solar():
             "cotizacion_personalizada": cotizacion_personalizada
         },
         "tarifa_desglose_actual": desglose_actual,
-        "tarifa_desglose_produccion": desglose_produccion  # 👈 este es el nuevo bloque para UI
+        "tarifa_desglose_produccion": desglose_produccion
     }
 
-    payload = {
-        "lead": {
-            "lead_id": lead.get("lead_id", ""),
-            "nombre": lead.get("nombre", ""),
-            "email": lead.get("email", "")
-        },
-        "ubicacion": {
-            "lat": float(data.get("lat") or 0),
-            "lng": float(data.get("lng") or 0),
-            "provincia_id": provincia["id"],
-            "provincia_nombre": provincia["nombre"]
-        },
+    # ---------- WEBHOOK con TODOS los campos (snake_case + coordenadas) ----------
+    webhook_payload = {
+        "lead_id": lead.get("lead_id", ""),
+        "nombre": lead.get("nombre", ""),
+        "email": lead.get("email", ""),
+        "provincia": provincia["nombre"],
+        "kwh_mensuales": round(mensual_promedio, 2),
+        "kwh_diarios": round(diario_promedio, 2),
+        "costo_mensual": round(costo_actual_mensual, 2),
+        "costo_anual": round(costo_actual_mensual * 12.0, 2),
+        "desglose_costo_actual": desglose_actual,
         "pvout": pvout,
-        "consumo": {
-            "mensual_promedio_kwh": mensual_promedio,
-            "diario_promedio_kwh": diario_promedio,
-            "meses_cargados": consumo.get("meses_cargados", 0)
-        },
-        "dimensionamiento": resp["dimensionamiento"],
-        "produccion": resp["produccion"],
-        "finanzas": resp["finanzas"]
+        "paneles_solares": paneles,
+        "microinversores": inversores,
+        "produccion_mensual_kwh": round(kwh_mensual),
+        "desglose_produccion": desglose_produccion,
+        "precio_sistema": round(precio_final, 2),
+        "tiempo_recuperacion_anios": round(payback_years, dec),
+        "ahorro_30_anios": round(ahorro_30_anos, 2),
+        "coords_lat": lat,
+        "coords_lng": lng
     }
-    send_webhook("solar_calculated", payload)
+    send_webhook("solar_calculated", webhook_payload)
+
     return jsonify(resp)
 
 if __name__ == "__main__":
