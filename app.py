@@ -265,8 +265,7 @@ def calculate_solar():
     precios = CONFIG["precios_sistema_por_paneles"]
     precio_base = float(precios.get(str(paneles))) if str(paneles) in precios else 0.0
     cotizacion_personalizada = (precio_base == 0.0 or paneles > max_precio_paneles)
-
-    markup_pct = float(provincia["markup_pct"])  # operativo; no se muestra en UI
+    markup_pct = float(provincia["markup_pct"])
     precio_final = precio_base * (1 + markup_pct / 100.0) if precio_base > 0 else 0.0
 
     # Finanzas
@@ -277,24 +276,20 @@ def calculate_solar():
         remanente = max(mensual_promedio - kwh_mensual, 0.0)
         costo_con_solar = calcular_tarifa_valor(remanente, tarifa)
         ahorro_mensual = costo_actual_mensual - costo_con_solar
-        # desglose con solar (para UI)
-        detalle_con_solar = calcular_tarifa_detalle(remanente, tarifa)
     else:
-        # método "generado": menos fiel a factura, pero mantenido por compatibilidad
         ahorro_mensual = calcular_tarifa_valor(kwh_mensual, tarifa)
         costo_con_solar = max(costo_actual_mensual - ahorro_mensual, 0.0)
-        # Para evitar inconsistencias, no calculamos desglose en este modo
-        detalle_con_solar = None
 
-    # Payback SOLO en años (precio_final / costo_actual_mensual)
-    payback_years = 0.0
-    if costo_actual_mensual > 0 and precio_final > 0:
-        payback_years = (precio_final / costo_actual_mensual) / 12.0
-
+    # Payback en años (precio_final / costo_actual_mensual)
+    payback_years = (precio_final / costo_actual_mensual) / 12.0 if (precio_final > 0 and costo_actual_mensual > 0) else 0.0
     ahorro_30_anos = (max(ahorro_mensual, 0.0) * 12.0 * 30.0) - precio_final
     reduccion_pct = min(max((max(ahorro_mensual, 0.0) / costo_actual_mensual) * 100.0 if costo_actual_mensual > 0 else 0, 0.0), 100.0)
-
     dec = CONFIG.get("finance", {}).get("payback_decimals", 1)
+
+    # Desgloses:
+    desglose_actual = calcular_tarifa_detalle(mensual_promedio, tarifa)
+    # 👉 NUEVO: “Desglose de Costo de Producción Estimado” = mismo cálculo, pero con kWh de producción mensual
+    desglose_produccion = calcular_tarifa_detalle(kwh_mensual, tarifa)
 
     resp = {
         "dimensionamiento": {
@@ -314,7 +309,7 @@ def calculate_solar():
             "ahorro_mensual_estimado": round(max(ahorro_mensual, 0.0), 2),
             "nuevo_costo_mensual": round(max(costo_con_solar, 0.0), 2),
             "precio_base_sistema": round(precio_base, 2),
-            "markup_pct": markup_pct,  # no se muestra en UI
+            "markup_pct": markup_pct,
             "precio_final_sistema": round(precio_final, 2),
             "payback_years": round(payback_years, dec),
             "ahorro_30_anos": round(ahorro_30_anos, 2),
@@ -328,9 +323,8 @@ def calculate_solar():
             },
             "cotizacion_personalizada": cotizacion_personalizada
         },
-        # nuevos desgloses para UI
-        "tarifa_desglose_actual": calcular_tarifa_detalle(mensual_promedio, tarifa),
-        "tarifa_desglose_con_solar": detalle_con_solar
+        "tarifa_desglose_actual": desglose_actual,
+        "tarifa_desglose_produccion": desglose_produccion  # 👈 este es el nuevo bloque para UI
     }
 
     payload = {
@@ -356,7 +350,6 @@ def calculate_solar():
         "finanzas": resp["finanzas"]
     }
     send_webhook("solar_calculated", payload)
-
     return jsonify(resp)
 
 if __name__ == "__main__":
